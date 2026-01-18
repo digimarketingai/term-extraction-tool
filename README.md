@@ -30,8 +30,6 @@ pip install -r requirements.txt
 # Run the application
 python app.py
 
-The application will start and provide a local URL (typically `http://127.0.0.1:7860`).
-
 ### Option 2: Run on Google Colab
 
 1. Open [Google Colab](https://colab.research.google.com/)
