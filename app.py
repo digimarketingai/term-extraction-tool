@@ -1,5 +1,6 @@
-# Term Extraction Tool v3.6
+# Term Extraction Tool v3.7
 # Bilingual Terminology Extractor with Gradio Interface
+# Enhanced: Custom Prompt Mode - Follow user commands directly!
 # Repository: https://github.com/digimarketingai
 
 import gradio as gr
@@ -119,7 +120,56 @@ def parse_terms(content):
     
     return terms
 
+def is_custom_command(focus_text):
+    """
+    Detect if the focus field contains a custom command/prompt.
+    Returns True if user wants to use custom extraction logic.
+    """
+    if not focus_text or not focus_text.strip():
+        return False
+    
+    focus_lower = focus_text.lower().strip()
+    
+    # Command indicators - words that suggest a custom instruction
+    command_indicators = [
+        # English command words
+        'extract', 'find', 'get', 'list', 'identify', 'locate', 'search',
+        'only', 'just', 'specifically', 'exclusively',
+        'please', 'i want', 'i need', 'give me', 'show me',
+        'focus on', 'look for', 'pull out', 'pick out',
+        'include', 'exclude', 'ignore', 'skip',
+        'all', 'every', 'any', 'must', 'should',
+        # Chinese command words
+        '提取', '找', '找出', '列出', '識別', '搜尋', '搜索',
+        '只要', '僅', '專門', '特別',
+        '請', '我要', '我需要', '給我', '顯示',
+        '專注', '尋找', '挑出',
+        '包含', '排除', '忽略', '跳過',
+        '所有', '每個', '任何', '必須', '應該',
+        # Pattern indicators
+        'term', 'terms', 'word', 'words', 'phrase', 'phrases',
+        'name', 'names', 'entity', 'entities',
+        '術語', '詞', '詞彙', '名稱', '實體',
+    ]
+    
+    # Check for command indicators
+    for indicator in command_indicators:
+        if indicator in focus_lower:
+            return True
+    
+    # Check for sentence-like structure (has verb-like patterns)
+    # If it's longer than typical keywords and has spaces, likely a command
+    if len(focus_text.strip()) > 20 and ' ' in focus_text:
+        return True
+    
+    # Check for punctuation that suggests a sentence/command
+    if any(p in focus_text for p in ['。', '，', '.', ',', '!', '！', '?', '？']):
+        return True
+    
+    return False
+
 def get_focus_instruction(focus):
+    """Get predefined focus instruction for simple keywords."""
     if not focus or not focus.strip():
         return ""
     
@@ -141,7 +191,75 @@ def get_focus_instruction(focus):
     
     return f"Pay special attention to terms related to: {focus}"
 
+def extract_chunk_custom(source, target, custom_prompt, client):
+    """
+    Extract terms using custom user prompt - follows user instructions directly!
+    """
+    if target:
+        max_target = min(len(target), 3000 - len(source))
+        target_truncated = target[:max_target]
+        
+        prompt = f"""You are a bilingual terminology extractor. Follow the user's specific instructions.
+
+<source_text>
+{source}
+</source_text>
+
+<target_text>
+{target_truncated}
+</target_text>
+
+USER INSTRUCTION: {custom_prompt}
+
+Based on the user's instruction above, extract the requested terms from the texts.
+Output ONLY a JSON array in this format:
+[{{"source":"來源術語","target":"target term","category":"type"}}]
+
+Important:
+- Follow the user's instruction precisely
+- If user asks for specific types of terms, only extract those
+- Match source terms with their translations from the target text
+- Use appropriate categories: medical, organization, place, social, technical, chemical, date, name, general"""
+
+    else:
+        prompt = f"""You are a bilingual terminology extractor. Follow the user's specific instructions.
+
+<text>
+{source}
+</text>
+
+USER INSTRUCTION: {custom_prompt}
+
+Based on the user's instruction above, extract the requested terms from the text.
+Output ONLY a JSON array in this format:
+[{{"source":"來源術語","target":"English translation","category":"type"}}]
+
+Important:
+- Follow the user's instruction precisely
+- If user asks for specific types of terms, only extract those
+- Provide accurate translations for extracted terms
+- Use appropriate categories: medical, organization, place, social, technical, chemical, date, name, general"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4.1-nano-2025-04-14",
+            messages=[
+                {"role": "system", "content": "You are a precise terminology extractor. Follow user instructions exactly. Output only valid JSON arrays."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=2500,
+        )
+        
+        content = resp.choices[0].message.content.strip()
+        terms = parse_terms(content)
+        return terms, content
+        
+    except Exception as e:
+        return [], str(e)
+
 def extract_chunk(source, target, focus, term_filter, client):
+    """Standard extraction with predefined logic."""
     focus_instruction = get_focus_instruction(focus)
     extract_all = (term_filter == "all")
     
@@ -271,7 +389,7 @@ def apply_filter(terms, term_filter):
 
 def extract_terms(source_text, target_text, focus, term_filter, max_terms, api_token, progress=gr.Progress()):
     if not source_text or not source_text.strip():
-        return "❌ Please enter source text.", "", gr.update(visible=False), ""
+        return "❌ Please enter source text. | 請輸入來源文本。", "", gr.update(visible=False), ""
     
     client = get_client(api_token)
     
@@ -279,7 +397,13 @@ def extract_terms(source_text, target_text, focus, term_filter, max_terms, api_t
     target_text = target_text.strip()[:MAX_CHARS] if target_text else ""
     focus = focus.strip() if focus else ""
     
+    # Detect if using custom command mode
+    use_custom_mode = is_custom_command(focus) and term_filter == "all"
+    
     progress(0.05, desc="📝 Preparing...")
+    
+    if use_custom_mode:
+        progress(0.1, desc="🎯 Custom command detected! Following your instructions...")
     
     source_chunks = smart_chunk(source_text, CHUNK_SIZE)
     target_chunks = smart_chunk(target_text, CHUNK_SIZE) if target_text else []
@@ -291,11 +415,20 @@ def extract_terms(source_text, target_text, focus, term_filter, max_terms, api_t
     debug_logs = []
     start_time = time.time()
     
+    mode_label = "CUSTOM COMMAND" if use_custom_mode else "STANDARD"
+    debug_logs.append(f"Mode: {mode_label}\n")
+    if use_custom_mode:
+        debug_logs.append(f"User Command: {focus}\n")
+    
     for i, (src, tgt) in enumerate(aligned_pairs):
         progress(0.1 + 0.7 * ((i + 1) / len(aligned_pairs)), 
                 desc=f"🤖 Segment {i+1}/{len(aligned_pairs)}...")
         
-        terms, raw = extract_chunk(src, tgt, focus, term_filter, client)
+        # Use custom extraction if in custom mode
+        if use_custom_mode:
+            terms, raw = extract_chunk_custom(src, tgt, focus, client)
+        else:
+            terms, raw = extract_chunk(src, tgt, focus, term_filter, client)
         
         debug_logs.append(f"""
 === Segment {i+1} ===
@@ -315,7 +448,13 @@ Response preview: {raw[:600]}...
     unique_terms = dedupe(valid_terms)
     raw_count = len(unique_terms)
     
-    filtered_terms = apply_filter(unique_terms, term_filter)
+    # Skip category filtering in custom mode - respect user's instruction
+    if use_custom_mode:
+        filtered_terms = unique_terms
+        filtered_terms.sort(key=lambda t: (t.get('category', 'zzz'), t['source']))
+    else:
+        filtered_terms = apply_filter(unique_terms, term_filter)
+    
     filtered_count = len(filtered_terms)
     
     final_terms = filtered_terms[:max_terms]
@@ -323,8 +462,9 @@ Response preview: {raw[:600]}...
     elapsed = time.time() - start_time
     
     debug_log = f"""=== EXTRACTION SUMMARY ===
+Mode: {mode_label}
 Token: {'Provided' if api_token.strip() else 'Anonymous'}
-Focus: {focus if focus else 'None'}
+Focus/Command: {focus if focus else 'None'}
 Filter: {term_filter}
 Segments: {len(aligned_pairs)}
 Time: {elapsed:.1f}s
@@ -340,12 +480,15 @@ Final: {len(final_terms)}
     
     if not final_terms:
         msg = f"⚠️ No terms found"
-        if term_filter != "all":
+        if use_custom_mode:
+            msg += f" matching your command.\n💡 Try a different instruction or simpler request."
+        elif term_filter != "all":
             msg += f" matching filter '{term_filter}'.\n💡 Try setting Filter to **'all'**."
         return msg, "", gr.update(visible=False), debug_log
     
     progress(0.95, desc="📊 Formatting...")
     
+    # Build result table
     table = "| # | Source | Target | Category |\n|:---:|:---|:---|:---:|\n"
     for i, t in enumerate(final_terms, 1):
         src = t['source'].replace('|', '∣')
@@ -353,6 +496,7 @@ Final: {len(final_terms)}
         cat = t.get('category', 'general')
         table += f"| {i} | {src} | {tgt} | {cat} |\n"
     
+    # Build CSV
     csv_lines = ["Source,Target,Category"]
     for t in final_terms:
         src_csv = t["source"].replace('"', '""')
@@ -362,11 +506,13 @@ Final: {len(final_terms)}
     
     progress(1.0, desc="✅ Done!")
     
+    # Build result message
+    mode_note = "🎯 **Custom Mode**" if use_custom_mode else ""
     filter_note = ""
-    if filtered_count < raw_count:
+    if not use_custom_mode and filtered_count < raw_count:
         filter_note = f" (filtered from {raw_count})"
     
-    result = f"✅ **{len(final_terms)} terms** extracted in {elapsed:.1f}s{filter_note}\n\n{table}"
+    result = f"✅ **{len(final_terms)} terms** extracted in {elapsed:.1f}s{filter_note}\n{mode_note}\n\n{table}"
     
     return result, csv_content, gr.update(visible=True), debug_log
 
@@ -410,36 +556,51 @@ def save_file(csv_content, fmt):
     return path
 
 def clear_all():
-    return "", "", "", "all", 150, "", "📋 Ready", "", gr.update(visible=False)
+    return "", "", "", "all", 150, "", "📋 Ready | 準備就緒", "", gr.update(visible=False)
 
 # ========== UI ==========
-with gr.Blocks(title="Term Extractor", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Term Extractor v3.7", theme=gr.themes.Soft()) as demo:
     
-    gr.Markdown("# 🔤 Terminology Extraction Tool v3.6")
+    gr.Markdown("# 🔤 Terminology Extraction Tool v3.7")
     gr.Markdown("Extract bilingual terminology from parallel texts. | 從平行文本中提取雙語術語。")
     gr.Markdown("*By [digimarketingai](https://github.com/digimarketingai)*")
     
     with gr.Row():
         with gr.Column():
-            source_box = gr.Textbox(label="📄 Source Text (Required) | 來源文本（必填）", lines=10, placeholder="Paste Chinese source text... | 貼上中文來源文本...")
+            source_box = gr.Textbox(
+                label="📄 Source Text (Required) | 來源文本（必填）", 
+                lines=10, 
+                placeholder="Paste Chinese source text... | 貼上中文來源文本..."
+            )
         with gr.Column():
-            target_box = gr.Textbox(label="📝 Target Text (Optional) | 目標文本（選填）", lines=10, placeholder="Paste English translation for better accuracy... | 貼上英文翻譯以提高準確性...")
+            target_box = gr.Textbox(
+                label="📝 Target Text (Optional) | 目標文本（選填）", 
+                lines=10, 
+                placeholder="Paste English translation for better accuracy... | 貼上英文翻譯以提高準確性..."
+            )
     
     with gr.Row():
         focus_box = gr.Textbox(
-            label="🎯 Extraction Focus (optional) | 提取重點（選填）", 
-            placeholder="e.g., social media, medical, organization, place, chemical, date",
-            info="Prioritize specific term types | 優先提取特定類型的術語",
+            label="🎯 Focus / Custom Command | 提取重點 / 自訂指令", 
+            placeholder="Keywords: social media, medical, place | OR | Custom: 'Extract only person names' / '只提取人名'",
+            info="💡 Enter keywords OR full commands! With Filter='all', commands are followed directly. | 輸入關鍵字或完整指令！篩選='all'時，會直接遵循指令。",
             scale=2
         )
         filter_dd = gr.Dropdown(
             label="📁 Filter | 篩選", 
             choices=["all", "social", "medical", "organizations", "places", "dates", "technical", "general"], 
             value="all",
-            info="Filter results by category | 按類別篩選結果",
+            info="Set to 'all' for custom commands | 設為 'all' 以使用自訂指令",
             scale=1
         )
-        max_slider = gr.Slider(label="Max Terms | 最大術語數", minimum=20, maximum=300, value=150, step=10, scale=1)
+        max_slider = gr.Slider(
+            label="Max Terms | 最大術語數", 
+            minimum=20, 
+            maximum=300, 
+            value=150, 
+            step=10, 
+            scale=1
+        )
     
     with gr.Accordion("🔑 API Token (Optional) | API 令牌（選填）", open=False):
         token_box = gr.Textbox(
@@ -466,17 +627,45 @@ with gr.Blocks(title="Term Extractor", theme=gr.themes.Soft()) as demo:
     with gr.Accordion("🔧 Debug Log | 除錯日誌", open=False):
         debug_box = gr.Textbox(lines=15, show_copy_button=True)
     
-    with gr.Accordion("💡 Tips | 使用提示", open=False):
+    with gr.Accordion("💡 Tips & Examples | 使用提示與範例", open=False):
         gr.Markdown("""
-**English:**
-- **Filter = 'all'**: Extracts maximum terms across all categories
-- **Focus**: Tells AI what to prioritize (e.g., "date" for dates/times)
-- **With target text**: More accurate translations from parallel alignment
+## 🆕 NEW: Custom Command Mode | 自訂指令模式
 
-**繁體中文：**
-- **篩選 = 'all'**：提取所有類別的最大術語數
-- **提取重點**：告訴 AI 優先提取什麼（例如，「date」用於日期/時間）
-- **有目標文本**：透過平行對齊獲得更準確的翻譯
+**When Filter = 'all'**, you can enter full commands in the Focus field:
+
+### English Examples:
+- `Extract only person names and titles`
+- `Find all organization names`
+- `Get only dates and time expressions`
+- `Extract medical terms related to dengue fever`
+- `List all social media accounts mentioned`
+- `Find chemical compound names only`
+
+### 繁體中文範例：
+- `只提取人名和職稱`
+- `找出所有機構名稱`
+- `只要日期和時間相關的詞彙`
+- `提取與登革熱相關的醫學術語`
+- `列出所有提到的社群媒體帳號`
+- `只找化學化合物名稱`
+
+---
+
+## Standard Mode | 標準模式
+
+**Simple keywords** trigger standard extraction with focus:
+- `social media` → Prioritizes social platforms
+- `medical` → Prioritizes medical terms
+- `place` → Prioritizes locations
+- `date` → Prioritizes dates/times
+
+---
+
+## General Tips | 一般提示
+
+- **Filter = 'all'**: Maximum extraction OR custom commands
+- **With target text**: More accurate translations
+- **Max Terms**: Limit results to top N terms
         """)
     
     extract_btn.click(
