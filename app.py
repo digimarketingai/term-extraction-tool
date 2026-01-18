@@ -491,4 +491,4 @@ with gr.Blocks(title="Term Extractor", theme=gr.themes.Soft()) as demo:
     ])
 
 if __name__ == "__main__":
-    demo.launch(Share=True)
+    demo.launch(share=True)
