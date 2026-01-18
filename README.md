@@ -29,6 +29,7 @@ pip install -r requirements.txt
 
 # Run the application
 python app.py
+```
 
 ### Option 2: Run on Google Colab
 
